@@ -193,3 +193,139 @@ describe("createAgentTransformAdapter", () => {
     expect(updates.explore?.description).toBe("ok")
   })
 })
+
+// ---------------------------------------------------------------------------
+// upsert path — v2's `AgentEditor.update()` CREATES the agent when the id is
+// missing (packages/core/src/plugin/agent.ts: `draft.update(AgentV2.defaultID,
+// …)` for agents the host has not predefined). OMO's own agents (sisyphus,
+// oracle, …) must therefore be CREATED, not skipped. Shape mirrors
+// oh-my-opencode-slim `src/v2/adapters.ts:applyAgentToDraft` (verified live on
+// @opencode/plugin 2.0.18).
+// ---------------------------------------------------------------------------
+describe("createAgentTransformAdapter upsert (v2 agents actually exist)", () => {
+  type Rule = { action: string; resource: string; effect: string }
+
+  function makeEditor(initial: Record<string, Record<string, unknown>> = {}) {
+    const registry: Record<string, Record<string, unknown>> = { ...initial }
+    const defaultFn = mock(() => {})
+    const editor: V2AgentEditor = {
+      default: defaultFn,
+      get: (id) => registry[id],
+      update: (id, fn) => {
+        const agent: Record<string, unknown> = registry[id] ?? {}
+        // Info.empty(id) defaults from @opencode-ai/schema/agent.
+        if (agent.request === undefined) agent.request = { headers: {}, body: {} }
+        if (agent.mode === undefined) agent.mode = "all"
+        if (agent.hidden === undefined) agent.hidden = false
+        if (agent.permissions === undefined) agent.permissions = []
+        fn(agent)
+        registry[id] = agent
+      },
+    }
+    return { editor, registry, defaultFn }
+  }
+
+  it("creates OMO agents that do not exist in the v2 registry", async () => {
+    const { editor, registry } = makeEditor()
+    const run = async () => ({
+      agent: {
+        sisyphus: {
+          mode: "primary",
+          model: "openrouter/deepseek/deepseek-v4.1-flash",
+          prompt: "you are sisyphus",
+          description: "orchestrator",
+        },
+        oracle: { mode: "subagent", prompt: "oracle" },
+      },
+    })
+    await createAgentTransformAdapter(run)(editor)
+    expect(Object.keys(registry).sort()).toEqual(["oracle", "sisyphus"])
+    expect(registry.sisyphus?.system).toBe("you are sisyphus")
+    expect(registry.sisyphus?.mode).toBe("primary")
+    expect(registry.sisyphus?.hidden).toBe(false)
+    expect(Array.isArray(registry.sisyphus?.permissions)).toBe(true)
+    expect(registry.oracle?.mode).toBe("subagent")
+  })
+
+  it("coerces every created agent model to object form, never a bare string", async () => {
+    const { editor, registry } = makeEditor()
+    const run = async () => ({
+      agent: {
+        oracle: { model: "openrouter/deepseek/deepseek-v4.1-flash" },
+        metis: { model: { providerID: "opencode-go", model: "mimo-v2.6-pro" } },
+        momus: {},
+      },
+    })
+    await createAgentTransformAdapter(run)(editor)
+    expect(registry.oracle?.model).toEqual({
+      id: "deepseek/deepseek-v4.1-flash",
+      providerID: "openrouter",
+    })
+    expect(registry.metis?.model).toEqual({ id: "mimo-v2.6-pro", providerID: "opencode-go" })
+    expect(typeof registry.momus?.model).not.toBe("string")
+  })
+
+  it("gives created agents a permissive base and applies explicit denials", async () => {
+    const { editor, registry } = makeEditor()
+    const run = async () => ({
+      agent: {
+        sisyphus: {
+          mode: "primary",
+          permission: {
+            question: "allow",
+            call_omo_agent: "deny",
+            task: "deny",
+            bash: "ask",
+          },
+        },
+      },
+    })
+    await createAgentTransformAdapter(run)(editor)
+    const rules = registry.sisyphus?.permissions as Rule[]
+    expect(rules[0]).toEqual({ action: "*", resource: "*", effect: "allow" })
+    expect(rules).toContainEqual({ action: "call_omo_agent", resource: "*", effect: "deny" })
+    expect(rules).toContainEqual({ action: "subagent", resource: "*", effect: "deny" })
+    expect(rules).toContainEqual({ action: "execute", resource: "*", effect: "ask" })
+  })
+
+  it("maps a v1 tools record onto permission rules", async () => {
+    const { editor, registry } = makeEditor()
+    const run = async () => ({ agent: { oracle: { tools: { read: true, write: false } } } })
+    await createAgentTransformAdapter(run)(editor)
+    const rules = registry.oracle?.permissions as Rule[]
+    expect(rules).toContainEqual({ action: "read", resource: "*", effect: "allow" })
+    expect(rules).toContainEqual({ action: "write", resource: "*", effect: "deny" })
+  })
+
+  it("resolves default_agent to an agent created by this transform", async () => {
+    const { editor, defaultFn } = makeEditor()
+    const run = async () => ({
+      default_agent: "sisyphus",
+      agent: { sisyphus: { mode: "primary" } },
+    })
+    await createAgentTransformAdapter(run)(editor)
+    expect(defaultFn).toHaveBeenCalledWith("sisyphus")
+  })
+
+  it("updates pre-existing agents without clobbering their fields", async () => {
+    const { editor, registry } = makeEditor({
+      build: { mode: "primary", hidden: false, description: "host build", hostOwned: true },
+    })
+    const run = async () => ({
+      agent: {
+        build: {
+          mode: "subagent",
+          hidden: true,
+          model: "opencode-go/mimo-v2.6-pro",
+          description: "Build agent",
+        },
+      },
+    })
+    await createAgentTransformAdapter(run)(editor)
+    expect(registry.build?.mode).toBe("primary")
+    expect(registry.build?.hidden).toBe(false)
+    expect(registry.build?.description).toBe("Build agent")
+    expect(registry.build?.model).toEqual({ id: "mimo-v2.6-pro", providerID: "opencode-go" })
+    expect(registry.build?.hostOwned).toBe(true)
+  })
+})

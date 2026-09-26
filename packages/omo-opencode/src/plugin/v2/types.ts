@@ -14,7 +14,14 @@ export type V2Cleanup = () => Promise<void>
 
 export type V2SystemPart = { type?: string; text?: string } & Record<string, unknown>
 
-export type V2MessageLike = { info: unknown; parts: Array<Record<string, unknown>> }
+export type V2MessageLike = {
+  id?: unknown
+  role?: unknown
+  content?: unknown
+  metadata?: unknown
+} & Record<string, unknown>
+
+export type MessageWithPartsLike = { info: Record<string, unknown>; parts: Array<Record<string, unknown>> }
 
 export type SessionContextEvent = {
   sessionID: string
@@ -88,7 +95,10 @@ export type V2ProviderEditor = {
 export type V2SetupContext = {
   location: { directory: string; worktree?: string }
   options?: Record<string, unknown>
-  session: { hook(name: string, cb: (event: never) => unknown): Promise<V2Registration> }
+  session: {
+    hook(name: string, cb: (event: never) => unknown): Promise<V2Registration>
+    get(input: { sessionID: string }): Promise<unknown>
+  }
   tool: {
     hook(name: string, cb: (event: never) => unknown): Promise<V2Registration>
     transform(cb: (editor: V2ToolEditor) => unknown): Promise<V2Registration>
@@ -143,7 +153,7 @@ export type ChatMessageOut = {
   parts: Array<Record<string, unknown>>
 }
 
-export type MessagesTransformOut = { messages: V2MessageLike[] }
+export type MessagesTransformOut = { messages: MessageWithPartsLike[] }
 
 export type SystemTransformIn = { sessionID?: string; model: { id: string; providerID: string } }
 export type SystemTransformOut = { system: string[] }

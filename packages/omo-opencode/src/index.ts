@@ -1,7 +1,7 @@
-import type { PluginModule } from "@opencode-ai/plugin"
+import type { DualPluginModule } from "./plugin/v2/types"
 import { createPluginModule } from "./testing/create-plugin-module"
 
-const pluginModule: PluginModule = createPluginModule()
+const pluginModule: DualPluginModule = createPluginModule()
 
 export const omoPlugin = pluginModule.server
 

@@ -6,7 +6,7 @@ type ToolArgSchema = ToolDefinition["args"][string]
 
 type SchemaWithJsonSchemaOverride = ToolArgSchema & {
   _zod: ToolArgSchema["_zod"] & {
-    toJSONSchema?: () => unknown
+    toJSONSchema?: () => Record<string, unknown>
   }
 }
 
@@ -40,6 +40,43 @@ export function normalizeToolArgSchemas<TDefinition extends Pick<ToolDefinition,
   }
 
   return toolDefinition
+}
+
+/**
+ * Builds a JSON Schema `object` for a tool arg map by converting each arg
+ * individually (per-arg, proven for every wrapper shape) instead of
+ * `z.object(args).toJSONSchema()`, which throws `seen.ref` TypeErrors across
+ * the SDK's pinned zod copy for `.describe()`-outermost args. `required` lists
+ * args whose def type is not `optional`.
+ *
+ * Per-arg conversion MUST call the schema's own `_zod.toJSONSchema` override
+ * (attached above) when present, not `tool.schema.toJSONSchema(schema)`: the
+ * outer converter re-enters `processSchema` on a wrapper node whose `seen`
+ * entry is missing and throws `undefined is not an object (evaluating
+ * 'seen.ref')` (zod 4.6.5 json-schema-processors). The override's inner
+ * conversion runs with the override detached, which is the safe path.
+ */
+export function argsToJsonSchema(args: Record<string, ToolArgSchema>): Record<string, unknown> {
+  const properties: Record<string, unknown> = {}
+  const required: string[] = []
+  for (const [key, schema] of Object.entries(args)) {
+    try {
+      const override = schema._zod.toJSONSchema
+      const jsonSchema = override ? override() : tool.schema.toJSONSchema(schema)
+      properties[key] = stripRootJsonSchemaFields(jsonSchema)
+    } catch (error) {
+      throw new Error(`tool arg "${key}" JSON Schema conversion failed`, { cause: error })
+    }
+    if (schema._zod.def.type !== "optional") {
+      required.push(key)
+    }
+  }
+  return {
+    type: "object",
+    properties,
+    ...(required.length > 0 ? { required } : {}),
+    additionalProperties: false,
+  }
 }
 
 const UNSUPPORTED_SCHEMA_KEYWORDS = new Set(["contentEncoding", "contentMediaType"])

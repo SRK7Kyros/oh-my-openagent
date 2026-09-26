@@ -1,5 +1,4 @@
-import { z } from "zod"
-
+import { argsToJsonSchema } from "../../normalize-tool-arg-schemas"
 import type {
   ToolAfterIn,
   ToolAfterOut,
@@ -64,10 +63,16 @@ export function createToolAfterAdapter(dispatch: V2Dispatch) {
 export function createToolTransformAdapter(dispatch: V2Dispatch) {
   return async (editor: V2ToolEditor): Promise<void> => {
     for (const [name, definition] of Object.entries(dispatch.tool ?? {})) {
+      let input: Record<string, unknown>
+      try {
+        input = argsToJsonSchema(definition.args)
+      } catch (error) {
+        throw new Error(`v2 tool input schema conversion failed for "${name}"`, { cause: error })
+      }
       const added: V2ToolInfo = {
         id: name,
         description: definition.description,
-        input: z.object(definition.args).toJSONSchema(),
+        input,
         execute: definition.execute,
       }
       editor.add(added)

@@ -1,47 +1,7 @@
 import type { V2AgentEditor, V2Dispatch, V2ModelEditor, V2ProviderEditor } from "../types"
+import { applyAgentEntry, isRecord, toModelRef } from "./agent"
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-}
-
-/**
- * Convert a config-side model selection to a runtime `Model.Ref`
- * (`{id, providerID, variant?}`). Accepts the short string form
- * `provider/model#variant` and the explicit object form
- * `{providerID, model|modelID|id, variant?}`. Mirrors v2's `Model.Ref.parse`
- * (packages/schema/src/model.ts) — returns `undefined` for invalid input
- * instead of throwing.
- */
-export function toModelRef(value: unknown): unknown {
-  if (typeof value === "string") {
-    const providerEnd = value.indexOf("/")
-    if (providerEnd <= 0) return undefined
-    const providerID = value.slice(0, providerEnd)
-    const variantStart = value.indexOf("#", providerEnd + 1)
-    const id = value.slice(providerEnd + 1, variantStart === -1 ? undefined : variantStart)
-    const variant = variantStart === -1 ? undefined : value.slice(variantStart + 1)
-    if (!id || providerID.includes("#") || (variant !== undefined && (!variant || variant.includes("#"))))
-      return undefined
-    return { id, providerID, ...(variant ? { variant } : {}) }
-  }
-  if (isRecord(value) && typeof value.providerID === "string") {
-    const id =
-      typeof value.id === "string"
-        ? value.id
-        : typeof value.model === "string"
-          ? value.model
-          : typeof value.modelID === "string"
-            ? value.modelID
-            : undefined
-    if (!id) return undefined
-    return {
-      id,
-      providerID: value.providerID,
-      ...(typeof value.variant === "string" ? { variant: value.variant } : {}),
-    }
-  }
-  return undefined
-}
+export { toModelRef } from "./agent"
 
 /**
  * v2 built-in primary agents that must stay selectable. OMO's v1 config
@@ -120,22 +80,33 @@ export function createModelTransformAdapter(run: () => Promise<Record<string, un
 }
 
 // 10b. config agent slice -> ctx.agent.transform
-// v2 limitation: AgentEditor has no add() — OMO agent definitions can only be
-// merged into agents that already exist (documented in the port artifact).
+// v2's AgentEditor has no add(), but `update(id, fn)` UPSERTS: the draft seeds
+// a fresh `AgentV2.Info.empty(id)` when the id is missing
+// (packages/core/src/plugin/agent.ts). OMO's own agents are therefore CREATED
+// here, not skipped. Existing host agents keep the update path (no regression).
 export function createAgentTransformAdapter(run: () => Promise<Record<string, unknown>>) {
   return async (editor: V2AgentEditor): Promise<void> => {
     const config = await run()
-    const defaultAgent = config.default_agent
-    if (typeof defaultAgent === "string" && editor.get(defaultAgent) !== undefined) {
-      editor.default(defaultAgent)
-    }
     const agents = config.agent
-    if (!isRecord(agents)) return
-    for (const [id, definition] of Object.entries(agents)) {
-      if (!isRecord(definition)) continue
-      if (editor.get(id) === undefined) continue
-      const safe = V2_PRIMARY_AGENTS.has(id) ? stripDemotion(definition) : definition
-      editor.update(id, (agent) => applyDefinition(agent, safe))
+    const created = new Set<string>()
+    if (isRecord(agents)) {
+      for (const [id, definition] of Object.entries(agents)) {
+        if (!isRecord(definition)) continue
+        if (editor.get(id) === undefined) {
+          editor.update(id, (agent) => applyAgentEntry(agent, id, definition))
+          created.add(id)
+        } else {
+          const safe = V2_PRIMARY_AGENTS.has(id) ? stripDemotion(definition) : definition
+          editor.update(id, (agent) => applyDefinition(agent, safe))
+        }
+      }
+    }
+    const defaultAgent = config.default_agent
+    if (
+      typeof defaultAgent === "string" &&
+      (created.has(defaultAgent) || editor.get(defaultAgent) !== undefined)
+    ) {
+      editor.default(defaultAgent)
     }
   }
 }

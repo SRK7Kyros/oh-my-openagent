@@ -1,4 +1,7 @@
-import type { Hooks, Plugin, PluginModule } from "@opencode-ai/plugin"
+import type { Hooks, Plugin } from "@opencode-ai/plugin"
+import type { DualPluginModule } from "../plugin/v2/types"
+import { toV1PluginInput } from "../plugin/v2/to-plugin-input"
+import { registerV2Hooks } from "../plugin/v2/register"
 import type { HookName } from "../config"
 import { validatePluginConfig } from "../config/validate"
 import { initConfigContext } from "../cli/config-manager/config-context"
@@ -156,7 +159,7 @@ function startupToastBody(input: {
   return undefined
 }
 
-export function createPluginModule(overrides: Partial<PluginModuleDeps> = {}): PluginModule {
+export function createPluginModule(overrides: Partial<PluginModuleDeps> = {}): DualPluginModule {
   const deps = { ...defaultPluginModuleDeps, ...overrides }
   let startupMigration: ReturnType<PluginModuleDeps["runOpenCodeStartupMigration"]> | undefined
   const serverPlugin: Plugin = async (input, _options): Promise<Hooks> => {
@@ -349,5 +352,10 @@ export function createPluginModule(overrides: Partial<PluginModuleDeps> = {}): P
   return {
     id: "oh-my-openagent",
     server: serverPlugin,
+    setup: async (ctx) => {
+      const input = toV1PluginInput(ctx)
+      const hooks = await serverPlugin(input, ctx.options)
+      return registerV2Hooks({ ctx, hooks })
+    },
   }
 }

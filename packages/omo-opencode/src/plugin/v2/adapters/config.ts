@@ -4,8 +4,77 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
 }
 
+/**
+ * Convert a config-side model selection to a runtime `Model.Ref`
+ * (`{id, providerID, variant?}`). Accepts the short string form
+ * `provider/model#variant` and the explicit object form
+ * `{providerID, model|modelID|id, variant?}`. Mirrors v2's `Model.Ref.parse`
+ * (packages/schema/src/model.ts) — returns `undefined` for invalid input
+ * instead of throwing.
+ */
+export function toModelRef(value: unknown): unknown {
+  if (typeof value === "string") {
+    const providerEnd = value.indexOf("/")
+    if (providerEnd <= 0) return undefined
+    const providerID = value.slice(0, providerEnd)
+    const variantStart = value.indexOf("#", providerEnd + 1)
+    const id = value.slice(providerEnd + 1, variantStart === -1 ? undefined : variantStart)
+    const variant = variantStart === -1 ? undefined : value.slice(variantStart + 1)
+    if (!id || providerID.includes("#") || (variant !== undefined && (!variant || variant.includes("#"))))
+      return undefined
+    return { id, providerID, ...(variant ? { variant } : {}) }
+  }
+  if (isRecord(value) && typeof value.providerID === "string") {
+    const id =
+      typeof value.id === "string"
+        ? value.id
+        : typeof value.model === "string"
+          ? value.model
+          : typeof value.modelID === "string"
+            ? value.modelID
+            : undefined
+    if (!id) return undefined
+    return {
+      id,
+      providerID: value.providerID,
+      ...(typeof value.variant === "string" ? { variant: value.variant } : {}),
+    }
+  }
+  return undefined
+}
+
+/**
+ * v2 built-in primary agents that must stay selectable. OMO's v1 config
+ * demotes `build`/`plan` to `subagent`+`hidden` (sisyphus is v1's primary), but
+ * v2's `AgentEditor` has no `add()` so sisyphus cannot exist — demoting build
+ * would leave v2 with no selectable primary.
+ */
+const V2_PRIMARY_AGENTS = new Set(["build", "plan"])
+
+function stripDemotion(definition: Record<string, unknown>): Record<string, unknown> {
+  const result: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(definition)) {
+    if (key === "mode" || key === "hidden") continue
+    result[key] = value
+  }
+  return result
+}
+
+/**
+ * Copy a v1 agent/provider definition onto a v2 runtime record. v2-structured
+ * keys (`model`, `permissions`, `request`, `mode`) are coerced or skipped when
+ * the v1-shaped value would clobber the v2 schema type.
+ */
 function applyDefinition(target: Record<string, unknown>, definition: Record<string, unknown>): void {
-  for (const [key, value] of Object.entries(definition)) target[key] = value
+  for (const [key, value] of Object.entries(definition)) {
+    if (key === "model") {
+      target[key] = toModelRef(value)
+      continue
+    }
+    if ((key === "permissions" || key === "request") && !isRecord(value)) continue
+    if (key === "mode" && typeof value !== "string") continue
+    target[key] = value
+  }
 }
 
 /**
@@ -57,13 +126,16 @@ export function createAgentTransformAdapter(run: () => Promise<Record<string, un
   return async (editor: V2AgentEditor): Promise<void> => {
     const config = await run()
     const defaultAgent = config.default_agent
-    if (typeof defaultAgent === "string") editor.default(defaultAgent)
+    if (typeof defaultAgent === "string" && editor.get(defaultAgent) !== undefined) {
+      editor.default(defaultAgent)
+    }
     const agents = config.agent
     if (!isRecord(agents)) return
     for (const [id, definition] of Object.entries(agents)) {
       if (!isRecord(definition)) continue
       if (editor.get(id) === undefined) continue
-      editor.update(id, (agent) => applyDefinition(agent, definition))
+      const safe = V2_PRIMARY_AGENTS.has(id) ? stripDemotion(definition) : definition
+      editor.update(id, (agent) => applyDefinition(agent, safe))
     }
   }
 }

@@ -407,26 +407,52 @@ describe("createPluginModule().setup() v2 hook registrations", () => {
     expect(event.prompt.text).toBe("rewritten")
   })
 
-  it("delegates the second context hook to messages.transform over the same messages ref", async () => {
-    // given: the messages transform handler
+  it("delegates the second context hook to messages.transform with v1 shape and flat write-back", async () => {
+    // given: the messages transform handler injecting a boundary part
     await runSetup()
+    let seenByHandler: unknown
+    messagesTransformHandler.mockImplementation((_input: unknown, output: unknown) => {
+      seenByHandler = structuredClone(output)
+      const out = output as { messages: Array<{ parts: Array<Record<string, unknown>> }> }
+      out.messages[0]?.parts.push({ type: "text", text: "injected" })
+      return Promise.resolve()
+    })
     const callback = sessionCallbacks.get("context")?.[1]
     expect(callback).toBeDefined()
 
-    // when: the v2 context event fires with messages
+    // when: the v2 context event fires with flat v2 messages
     const event = {
       sessionID: "s1",
       model: { id: "mod", providerID: "prov" },
       agent: "sisyphus",
       system: [],
-      messages: [{ info: { role: "user" }, parts: [] }],
+      messages: [{ id: "m1", role: "user", content: [{ type: "text", text: "hello" }], metadata: {} }],
       options: {},
     }
     await callback?.(event)
 
-    // then: the shared handler received the very same messages array (mapped, in-place mutation)
+    // then: the handler saw v1 {info, parts} and the mutation landed as flat v2 content
     expect(messagesTransformHandler).toHaveBeenCalledTimes(1)
-    expect(messagesTransformHandler.mock.calls[0]?.[1]).toEqual({ messages: event.messages })
+    expect(seenByHandler).toEqual({
+      messages: [
+        {
+          info: { sessionID: "s1", id: "m1", role: "user", metadata: {} },
+          parts: [{ type: "text", text: "hello" }],
+        },
+      ],
+    })
+    expect(event.messages).toEqual([
+      {
+        sessionID: "s1",
+        id: "m1",
+        role: "user",
+        metadata: {},
+        content: [
+          { type: "text", text: "hello" },
+          { type: "text", text: "injected" },
+        ],
+      },
+    ])
   })
 
   it("delegates the third context hook to system.transform with system write-back", async () => {
@@ -590,7 +616,7 @@ describe("createPluginModule().setup() v2 hook registrations", () => {
     const agentDefault = mock(() => {})
     await agentTransformCallback?.({
       default: agentDefault,
-      get: () => undefined,
+      get: (id: string) => (id === "sisyphus" ? { mode: "primary" } : undefined),
       update: mock(() => {}),
     })
     const providerAdd = mock(() => {})

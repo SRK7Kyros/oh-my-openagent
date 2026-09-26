@@ -6,6 +6,7 @@ import type {
   ChatParamsOut,
   CompactingIn,
   CompactingOut,
+  MessageWithPartsLike,
   MessagesTransformOut,
   SessionCompactionEvent,
   SessionContextEvent,
@@ -13,6 +14,7 @@ import type {
   SessionPromptEvent,
   SystemTransformIn,
   V2Dispatch,
+  V2MessageLike,
   V2SystemPart,
 } from "../types"
 
@@ -112,12 +114,30 @@ export function createChatMessageAdapter(dispatch: V2Dispatch, tracker: PromptTr
 }
 
 // 4. experimental.chat.messages.transform -> ctx.session.hook("context") over event.messages
+// v2 messages are flat {id, role, content, metadata}; v1 handlers expect {info, parts}.
+// Wrap on entry and write flat messages back so handler mutations (incl. unshift) land
+// in the event. A preserved sessionID on info (e.g. btw-side parent context) wins over
+// the synthesized event sessionID on re-wrap.
+function toMessageWithParts(message: V2MessageLike, sessionID: string): MessageWithPartsLike {
+  const { content, ...info } = message
+  return {
+    info: { sessionID, ...info },
+    parts: Array.isArray(content) ? content : [],
+  }
+}
+
+function toFlatMessage(entry: MessageWithPartsLike): V2MessageLike {
+  return { ...entry.info, content: entry.parts }
+}
+
 export function createMessagesTransformAdapter(dispatch: V2Dispatch) {
   return async (event: SessionContextEvent): Promise<void> => {
     const handler = dispatch["experimental.chat.messages.transform"]
     if (!handler) return
-    const output: MessagesTransformOut = { messages: event.messages }
+    const wrapped = event.messages.map((message) => toMessageWithParts(message, event.sessionID))
+    const output: MessagesTransformOut = { messages: wrapped }
     await handler({}, output)
+    event.messages.splice(0, event.messages.length, ...output.messages.map(toFlatMessage))
   }
 }
 

@@ -71,8 +71,10 @@ export function createToolTransformAdapter(dispatch: V2Dispatch) {
       }
       const added: V2ToolInfo = {
         id: name,
+        name,
         description: definition.description,
         input,
+        inputSchema: input,
         execute: definition.execute,
       }
       editor.add(added)

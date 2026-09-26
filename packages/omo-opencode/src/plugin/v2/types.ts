@@ -63,8 +63,14 @@ export type ToolExecuteAfterEvent = ToolExecuteBeforeEvent & {
 
 export type V2ToolInfo = {
   id?: string
+  // v2's ToolRegistration schema requires `name` (and `inputSchema`); `id`/`input`
+  // are kept because the transform editor `list()`/`update()` surface uses `id`.
+  // Without `name` the v2 Code Mode namespace builder crashes on
+  // `e.name.replace` for every command.updated.
+  name?: string
   description: string
   input: unknown
+  inputSchema?: unknown
   execute: (...args: never[]) => unknown
 }
 

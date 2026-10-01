@@ -26,8 +26,11 @@ import type { V2SetupContext } from "./types"
  * - `tui.showToast` — required; added here.
  * - `session.get` / `session.messages` / `session.list` — required; rebuilt here.
  * - `session.abort` — retry path only, wrapped in try/catch (fail soft).
- * - `session.todo`/`promptAsync`/`status`/`create`/`delete`/`summarize`
- *   /`children`/`message` — tool/CLI paths, not the prompt path.
+ * - `session.status` — required; the prompt gate's idle check (`isSessionActive`)
+ *   and the look_at / task / call_omo_agent pollers read it, so it must return the
+ *   real active map rather than an empty page.
+ * - `session.todo`/`promptAsync`/`create`/`delete`/`summarize`
+ *   /`children`/`message` — tool/CLI paths, not the plain prompt path.
  * - `app.agents` / `app.skills` — tool/CLI paths; one call site is optional
  *   chained, the others are not reached on a plain prompt.
  * - `provider.list` — guarded by a `typeof … === "function"` check upstream.
@@ -151,14 +154,10 @@ function toV1Message(message: unknown): V1Message | undefined {
  * `path.normalize(undefined)`, which Bun reports as `The "path" property must be of type string`.
  */
 function toV1Session(session: Record<string, unknown>): Record<string, unknown> {
-  const location = isRecord(session.location) ? session.location : undefined
-  const directory =
-    typeof session.directory === "string"
-      ? session.directory
-      : typeof location?.directory === "string"
-        ? location.directory
-        : undefined
-  return directory === undefined ? session : { ...session, directory }
+  const flat = session.directory
+  if (typeof flat === "string") return session
+  const nested = asRecord(session.location).directory
+  return typeof nested === "string" ? { ...session, directory: nested } : session
 }
 
 function toV1Messages(messages: unknown[]): V1Message[] {
@@ -166,27 +165,145 @@ function toV1Messages(messages: unknown[]): V1Message[] {
 }
 
 function toV1Client(ctx: V2SetupContext): PluginContext["client"] {
+  const base = process.env.OPENCODE_SERVER_URL ?? "http://127.0.0.1:4096"
+  const password = process.env.OPENCODE_SERVER_PASSWORD
+  const call = async <T>(method: string, path: string, body?: unknown): Promise<T> => {
+    const headers: Record<string, string> = { "content-type": "application/json" }
+    if (password) headers.authorization = `Basic ${Buffer.from(`opencode:${password}`).toString("base64")}`
+    const res = await fetch(`${base}${path}`, {
+      method,
+      headers,
+      body: body === undefined ? undefined : JSON.stringify(body),
+    })
+    if (!res.ok) {
+      const text = await res.text().catch(() => "")
+      throw new Error(`v1 bridge ${method} ${path} failed: ${res.status} ${text}`)
+    }
+    // Several v2 routes answer with an empty body (`POST /api/session/:id/agent` and
+    // `POST /api/session/:id/interrupt` are 204 No Content). A v1 SDK call resolves to
+    // `undefined` for those; `res.json()` threw `SyntaxError: Unexpected end of JSON input`,
+    // which on the prompt path aborted at `/agent` before `/prompt` was ever sent.
+    const text = await res.text()
+    return text.length === 0 ? (undefined as T) : (JSON.parse(text) as T)
+  }
+  const q = (input?: { query?: Record<string, unknown> }): string => {
+    const params = new URLSearchParams()
+    for (const [key, value] of Object.entries(input?.query ?? {})) {
+      if (value !== undefined && value !== null) params.set(key, String(value))
+    }
+    const s = params.toString()
+    return s.length > 0 ? `?${s}` : ""
+  }
+  // v1 prompt bodies are {parts: [{type:"text",text}]} (plus model/agent/tools/variant), but the
+  // v2 `/prompt` endpoint's payload is PromptInput.Prompt = {text, files?, agents?, skills?}
+  // (packages/schema/src/prompt-input.ts) and rejects a body without `text` ("Missing key at
+  // [\"text\"]", 400). Concatenate the text parts into `text` and carry over only the fields v2
+  // accepts; `variant`/`tools` have no v2 equivalent and are dropped (the v2 create payload does
+  // take `agent`/`model`, so the agent is selected at session level instead — see `prompt`).
+  const toV2PromptBody = (body?: Record<string, unknown>): Record<string, unknown> => {
+    const b = asRecord(body)
+    const parts = Array.isArray(b.parts) ? b.parts : []
+    const text = parts
+      .map((part) => {
+        const p = asRecord(part)
+        return p.type === "text" && typeof p.text === "string" ? p.text : ""
+      })
+      .filter((value) => value.length > 0)
+      .join("\n")
+    const out: Record<string, unknown> = { text: typeof b.text === "string" ? b.text : text }
+    // v1 attachments ride inside `parts` as `{type:"file", url, filename}`; v2 takes them
+    // out-of-band as `files:[{uri, name}]`. Dropping them handed look_at's multimodal-looker
+    // child a text-only prompt, so it replied that no document was attached.
+    const files = parts.flatMap((part) => {
+      const p = asRecord(part)
+      if (p.type !== "file") return []
+      const uri = typeof p.url === "string" ? p.url : typeof p.uri === "string" ? p.uri : undefined
+      if (uri === undefined) return []
+      const name = typeof p.filename === "string" ? p.filename : typeof p.name === "string" ? p.name : undefined
+      return [name === undefined ? { uri } : { uri, name }]
+    })
+    if (files.length > 0) out.files = files
+    for (const key of ["model", "metadata", "delivery", "id", "resume"]) {
+      if (b[key] !== undefined) out[key] = b[key]
+    }
+    return out
+  }
+
+  const id = (input: { path?: { id?: string } }, method: string): string => {
+    const sessionID = input?.path?.id
+    if (typeof sessionID !== "string" || sessionID.length === 0) {
+      throw new Error(`session.${method} requires path.id`)
+    }
+    return sessionID
+  }
   return {
     session: {
-      get: (input: { path?: { id?: string } }) => {
-        const sessionID = input?.path?.id
-        if (typeof sessionID !== "string" || sessionID.length === 0) {
-          throw new Error("session.get requires path.id")
-        }
-        return ctx.session.get({ sessionID })
-      },
+      get: (input: { path?: { id?: string } }) => call("GET", `/api/session/${id(input, "get")}`),
       list: async (input?: { query?: Record<string, unknown> }) => {
-        const page = await ctx.session.list(input?.query)
-        return { ...page, data: (page?.data ?? []).map(toV1Session) }
+        const page = await call<{ data?: unknown[] }>("GET", `/api/session${q(input)}`)
+        return { ...page, data: (page?.data ?? []).map((s) => toV1Session(asRecord(s))) }
       },
       messages: async (input: { path?: { id?: string } }): Promise<{ data: V1Message[] }> => {
-        const sessionID = input?.path?.id
-        if (typeof sessionID !== "string" || sessionID.length === 0) {
-          throw new Error("session.messages requires path.id")
-        }
-        return { data: toV1Messages(await ctx.session.messages({ sessionID })) }
+        const sessionID = id(input, "messages")
+        const page = await call<{ data?: unknown[] }>("GET", `/api/session/${sessionID}/message`)
+        return { data: toV1Messages(page?.data ?? []) }
       },
+      message: async (input: { path?: { id?: string; messageID?: string } }) => {
+        const sessionID = id(input, "message")
+        const messageID = input?.path?.messageID
+        if (typeof messageID !== "string" || messageID.length === 0) {
+          throw new Error("session.message requires path.messageID")
+        }
+        return call("GET", `/api/session/${sessionID}/message/${messageID}`)
+      },
+      create: async (input?: { body?: Record<string, unknown> }) =>
+        call("POST", `/api/session`, {
+          ...(input?.body ?? {}),
+          location: { directory: ctx.location.directory },
+        }),
+      prompt: async (input: { path?: { id?: string }; body?: Record<string, unknown> }) => {
+        const sessionID = id(input, "prompt")
+        // v1 selects the agent per prompt; v2 selects it per session (session.create takes
+        // `agent`/`model` — packages/server/src/handlers/session.ts). Without this switch a
+        // delegated sub-agent prompt (look_at's multimodal-looker, call_omo_agent, task) runs as
+        // the parent's default agent and the caller never receives its reply.
+        const agent = asRecord(input?.body).agent
+        if (typeof agent === "string" && agent.length > 0) {
+          await call("POST", `/api/session/${sessionID}/agent`, { agent })
+        }
+        return call("POST", `/api/session/${sessionID}/prompt`, toV2PromptBody(input?.body))
+      },
+      // v1 `abort` maps to the v2 `interrupt` route.
+      abort: async (input: { path?: { id?: string } }) =>
+        call("POST", `/api/session/${id(input, "abort")}/interrupt`),
+      delete: async (input: { path?: { id?: string } }) =>
+        call("DELETE", `/api/session/${id(input, "delete")}`),
+      // v1 `summarize` maps to the v2 `compact` route.
+      summarize: async (input: { path?: { id?: string }; body?: Record<string, unknown> }) =>
+        call("POST", `/api/session/${id(input, "summarize")}/compact`, input?.body),
+      // v1 `promptAsync` has no v2 route; it degrades to the sync `/prompt` so callers never
+      // see an undefined method.
+      promptAsync: async (input: { path?: { id?: string }; body?: Record<string, unknown> }) =>
+        call("POST", `/api/session/${id(input, "promptAsync")}/prompt`, toV2PromptBody(input?.body)),
+      children: async (input: { query?: Record<string, unknown> }) =>
+        call("GET", `/api/session${q({ query: { ...input?.query, parentID: input?.query?.id } })}`),
+      // v1 `status` reads the active map, not an empty page: `GET /api/session/active` answers
+      // `{data:{<sessionID>:{type}}}` (type is `running` while a drain owns the session). The
+      // previous `{data:{}}` stub made every session look "never seen" to the prompt gate's
+      // `isSessionActive` and pinned look_at's poller in its active branch until the 120s timeout.
+      status: async () => {
+        const active = await call<{ data?: unknown }>("GET", "/api/session/active")
+        return { data: asRecord(active?.data) }
+      },
+      // v2 exposes no todo API; this mirrors the existing documented degradation.
       todo: async () => ({ data: [] }),
+    },
+    app: {
+      agents: async () => call("GET", `/api/agent${q()}`),
+      skills: async () => call("GET", `/api/skill${q()}`),
+    },
+    provider: {
+      list: async () => call("GET", `/api/provider${q()}`),
     },
     tui: {
       showToast: async (): Promise<undefined> => undefined,

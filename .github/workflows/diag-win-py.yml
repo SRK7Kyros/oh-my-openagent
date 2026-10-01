@@ -147,3 +147,52 @@ jobs:
           console.log("WORKING p99", sorted[Math.ceil(sorted.length * .99) - 1], "samples", samples.length);
           '@ | Set-Content -Encoding utf8 "$env:RUNNER_TEMP/py-stage-lab.mjs"
           bun "$env:RUNNER_TEMP/py-stage-lab.mjs"
+      - uses: actions/checkout@v7
+        with:
+          repository: code-yeongyu/senpi
+          ref: c40baaa51ff62b2287bfa4e8a1ae11ce3585990b
+          path: senpi-green
+      - uses: actions/download-artifact@v8
+        with:
+          name: desktop-engine-win32-x64
+          run-id: 36875748348
+          github-token: ${{ github.token }}
+          path: desktop-engine
+      - name: Build full omo binary with PR codemode sources
+        shell: pwsh
+        run: |
+          bun install --frozen-lockfile --ignore-scripts
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          bun -e 'import {cpSync} from "node:fs"; import {join} from "node:path"; import {resolvePackageDir} from "./script/engine-sidecar-sources.ts"; const dir=resolvePackageDir("@code-yeongyu/senpi-codemode"); if (!dir) throw new Error("codemode not installed"); cpSync("senpi-green/packages/senpi-codemode/src",join(dir,"src"),{recursive:true});'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $target = bun script/release-desktop-engine-target.ts --target windows-x64 | ConvertFrom-Json
+          New-Item -ItemType Directory -Force (Split-Path $target.source) | Out-Null
+          Copy-Item "desktop-engine/$($target.asset)" $target.source
+          bun script/build-omo-binary.ts --target windows-x64 --omo-version 5.1.8 --omo-ai-version 5.1.8
+          exit $LASTEXITCODE
+      - name: GREEN full packaged cold and warm smoke
+        shell: pwsh
+        run: |
+          $binary = (Resolve-Path ".omo/release-binaries/omo-windows-x64.exe").Path
+          foreach ($label in @("cold", "warm")) {
+            $clock = [System.Diagnostics.Stopwatch]::StartNew()
+            bun script/qa/omo-native-eval-smoke.mjs $binary
+            $code = $LASTEXITCODE
+            Write-Output "WORKING patched-packaged-$label exit=$code elapsed_ms=$($clock.ElapsedMilliseconds)"
+            if ($code -ne 0) { exit $code }
+          }
+      - name: GREEN compiled Python stage timings
+        shell: pwsh
+        run: |
+          Push-Location senpi-green
+          bun install --frozen-lockfile --ignore-scripts
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $hostRoot = "$env:RUNNER_TEMP/python-green"
+          New-Item -ItemType Directory -Force $hostRoot | Out-Null
+          bun build --compile --target bun-windows-x64 packages/senpi-codemode/scripts/qa-python-startup.ts --outfile "$hostRoot/python-host.exe"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $sidecar = "$hostRoot/node_modules/@code-yeongyu/senpi-codemode/src/kernels/py"
+          New-Item -ItemType Directory -Force $sidecar | Out-Null
+          Copy-Item packages/senpi-codemode/src/kernels/py/prelude.py "$sidecar/prelude.py"
+          & "$hostRoot/python-host.exe"
+          exit $LASTEXITCODE

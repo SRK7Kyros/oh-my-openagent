@@ -104,6 +104,8 @@ export type V2SetupContext = {
   session: {
     hook(name: string, cb: (event: never) => unknown): Promise<V2Registration>
     get(input: { sessionID: string }): Promise<unknown>
+    list(input?: Record<string, unknown>): Promise<{ data: unknown[] }>
+    messages(input: { sessionID: string }): Promise<unknown[]>
   }
   tool: {
     hook(name: string, cb: (event: never) => unknown): Promise<V2Registration>

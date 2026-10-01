@@ -32,17 +32,34 @@ export function createToolBeforeAdapter(dispatch: V2Dispatch) {
   }
 }
 
+function contentText(content: unknown): string {
+  if (typeof content === "string") return content
+  if (!Array.isArray(content)) return ""
+  return content
+    .filter((part): part is { type: string; text: string } =>
+      isRecord(part) && part.type === "text" && typeof part.text === "string",
+    )
+    .map((part) => part.text)
+    .join("\n")
+}
+
 // 8. tool.execute.after -> ctx.tool.hook("execute.after")
 //    Only "completed" results map (v1 has no error channel for this hook).
+//    v1's `output` is the model-facing text, which v2 carries in `content`; aliasing it onto
+//    `result.output` handed the hooks an empty string (the search reminder then replaced the
+//    real output) and wrote that value back over the tool's machine output, so Code Mode saw
+//    "" instead of the value.
 export function createToolAfterAdapter(dispatch: V2Dispatch) {
   return async (event: ToolExecuteAfterEvent): Promise<void> => {
     if (event.status !== "completed") return
     const handler = dispatch["tool.execute.after"]
     if (!handler) return
     const result = isRecord(event.result) ? event.result : {}
+    const fromContent = contentText(result.content)
+    const initial = fromContent !== "" ? fromContent : typeof result.output === "string" ? result.output : ""
     const output: ToolAfterOut = {
       title: typeof result.title === "string" ? result.title : "",
-      output: typeof result.output === "string" ? result.output : "",
+      output: initial,
       metadata: isRecord(result.metadata) ? result.metadata : {},
     }
     const input: ToolAfterIn = {
@@ -53,8 +70,10 @@ export function createToolAfterAdapter(dispatch: V2Dispatch) {
     }
     await handler(input, output)
     result.title = output.title
-    result.output = output.output
     result.metadata = output.metadata
+    if (output.output !== initial) {
+      result.content = output.output === "" ? [] : [{ type: "text", text: output.output }]
+    }
     event.result = result
   }
 }

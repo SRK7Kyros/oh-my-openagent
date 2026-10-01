@@ -8,9 +8,11 @@
  */
 import { OUTBOX_RETENTION_MS, rfc3339 } from "./bindings"
 import { DELIVERY_RETENTION_MS, PAIR_BUCKET_BURST, PAIR_BUCKET_REFILL_MS, RETENTION_SWEEP_BATCH, RETENTION_SWEEP_INTERVAL_MS } from "./constants"
+import type { Sql } from "./sql"
 import { OPEN_STATES, type StoreContext, write } from "./store-ops"
 
-const nextSweepDue = new WeakMap<StoreContext, number>()
+/** Keyed by the connection: an extension call joins core operations through a derived context. */
+const nextSweepDue = new WeakMap<Sql, number>()
 
 export type RetentionSweep = {
   readonly deliveries: number
@@ -24,10 +26,10 @@ export type RetentionSweep = {
 
 /** Runs one bounded sweep when one is due; call it inside an open write transaction. */
 export function sweepRetentionIfDue(ctx: StoreContext, now: number): RetentionSweep | null {
-  if (now < (nextSweepDue.get(ctx) ?? Number.NEGATIVE_INFINITY)) return null
+  if (now < (nextSweepDue.get(ctx.sql) ?? Number.NEGATIVE_INFINITY)) return null
   const swept = sweepRetention(ctx, now)
   const full = Object.values(swept).some((count) => count >= RETENTION_SWEEP_BATCH)
-  nextSweepDue.set(ctx, full ? now : now + RETENTION_SWEEP_INTERVAL_MS)
+  nextSweepDue.set(ctx.sql, full ? now : now + RETENTION_SWEEP_INTERVAL_MS)
   return swept
 }
 

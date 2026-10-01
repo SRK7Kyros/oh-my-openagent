@@ -1,0 +1,103 @@
+name: Diagnose Windows Python readiness
+on:
+  push:
+    branches: [diag/win-py-kernel-20261001]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  diagnose:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12.10"
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.2"
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-binary-windows-x64
+          run-id: 36875748348
+          github-token: ${{ github.token }}
+          path: packaged
+      - name: Cold and warm packaged smoke
+        shell: pwsh
+        run: |
+          $binary = (Get-ChildItem packaged -Recurse -Filter *.exe | Select-Object -First 1).FullName
+          if (!$binary) { throw "release artifact has no executable" }
+          foreach ($label in @("cold", "warm")) {
+            $clock = [System.Diagnostics.Stopwatch]::StartNew()
+            bun script/qa/omo-native-eval-smoke.mjs $binary
+            $code = $LASTEXITCODE
+            Write-Output "WORKING packaged-$label exit=$code elapsed_ms=$($clock.ElapsedMilliseconds)"
+          }
+      - name: Interpreter and stdlib import cost
+        shell: pwsh
+        run: |
+          $clock = [System.Diagnostics.Stopwatch]::StartNew()
+          python --version
+          Write-Output "WORKING probe elapsed_ms=$($clock.ElapsedMilliseconds)"
+          $clock.Restart()
+          python -X importtime -c "import asyncio, subprocess, urllib.request, concurrent.futures"
+          Write-Output "WORKING imports elapsed_ms=$($clock.ElapsedMilliseconds)"
+      - uses: actions/checkout@v7
+        with:
+          repository: code-yeongyu/senpi
+          ref: main
+          path: senpi-lab
+      - name: Measure fresh prelude stages
+        shell: pwsh
+        run: |
+          @'
+          import { spawn } from "node:child_process";
+          import { mkdtemp, readFile, writeFile, rm } from "node:fs/promises";
+          import { tmpdir } from "node:os";
+          import { join } from "node:path";
+          import { createInterface } from "node:readline";
+          const source = await readFile("senpi-lab/packages/senpi-codemode/src/kernels/py/prelude.py", "utf8");
+          const startFrame = 'import sys\nsys.__stdout__.write(\'{"type":"startup-progress","stage":"stdlib-imports"}\\n\')\nsys.__stdout__.flush()\n';
+          const importedFrame = 'sys.__stdout__.write(\'{"type":"startup-progress","stage":"runtime-init"}\\n\')\nsys.__stdout__.flush()\n';
+          const instrumented = source.replace("import ast\n", startFrame + "import ast\n")
+            .replace("CONNECTION: dict", importedFrame + "CONNECTION: dict")
+            .replace("    signal.signal(signal.SIGINT", '    emit({"type":"startup-progress","stage":"host-init"})\n    signal.signal(signal.SIGINT');
+          const samples = [];
+          for (let index = 0; index < 30; index++) {
+            const root = await mkdtemp(join(tmpdir(), "py-cold-stage-"));
+            const script = join(root, "prelude.py");
+            const begin = performance.now();
+            await writeFile(script, instrumented);
+            const materializeMs = performance.now() - begin;
+            const child = spawn("python", ["-u", script], {
+              stdio: "pipe", windowsHide: true,
+              env: { ...process.env, PYTHONPYCACHEPREFIX: join(root, "pycache"), PYTHONUNBUFFERED: "1" },
+            });
+            const stages = {};
+            let stderr = "";
+            child.stderr.on("data", chunk => { stderr += chunk.toString(); });
+            const exited = new Promise(resolve => child.once("close", resolve));
+            const frames = createInterface({ input: child.stdout });
+            const ready = new Promise((resolve, reject) => {
+              const timer = setTimeout(() => { child.kill(); reject(new Error("stage lab hung")); }, 60000);
+              child.once("error", error => { clearTimeout(timer); reject(error); });
+              frames.on("line", line => {
+                const frame = JSON.parse(line);
+                if (frame.type === "startup-progress") stages[frame.stage] = performance.now() - begin;
+                if (frame.type === "ready") { clearTimeout(timer); resolve(performance.now() - begin); }
+              });
+            });
+            child.stdin.write(JSON.stringify({ type: "init", sessionId: "lab", connection: { port: 1, token: "fixture" } }) + "\n");
+            const readyMs = await ready;
+            child.stdin.end('{"type":"close"}\n');
+            await exited;
+            frames.close();
+            samples.push({ index, materializeMs, stages, readyMs, stderr });
+            console.log("WORKING sample", JSON.stringify(samples.at(-1)));
+            await rm(root, { recursive: true, force: true });
+          }
+          const sorted = samples.map(sample => sample.readyMs).sort((a,b) => a-b);
+          console.log("WORKING p99", sorted[Math.ceil(sorted.length * .99) - 1], "samples", samples.length);
+          '@ | Set-Content -Encoding utf8 "$env:RUNNER_TEMP/py-stage-lab.mjs"
+          bun "$env:RUNNER_TEMP/py-stage-lab.mjs"

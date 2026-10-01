@@ -46,8 +46,54 @@ jobs:
       - uses: actions/checkout@v7
         with:
           repository: code-yeongyu/senpi
-          ref: main
+          ref: 3d2a337bb
           path: senpi-lab
+      - name: Compile main Python transport and capture cold deadline miss
+        shell: pwsh
+        run: |
+          Push-Location senpi-lab
+          bun install --frozen-lockfile --ignore-scripts
+          @'
+          import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+          import { tmpdir } from "node:os";
+          import { join, dirname } from "node:path";
+          import { PythonKernel } from "./packages/senpi-codemode/src/kernels/py/kernel.ts";
+          const root = mkdtempSync(join(tmpdir(), "py-transport-cold-"));
+          for (const label of ["cold", "warm"]) {
+            const begin = performance.now();
+            let stage = "interpreter-launch";
+            try {
+              const kernel = await PythonKernel.start({
+                interpreterPath: "python", sessionId: label, cwd: root,
+                connection: { port: 1, token: "fixture" },
+                env: { PYTHONPYCACHEPREFIX: join(root, "pycache") },
+                onMessage(message) {
+                  if (message.type === "status" && message.event.op === "kernel-startup") {
+                    stage = String(message.event.stage);
+                    console.log("WORKING transport-stage", label, stage, performance.now() - begin);
+                  }
+                  if (message.type === "text") console.log("WORKING child-stderr", message.data);
+                },
+              });
+              const readyMs = performance.now() - begin;
+              const result = await kernel.run({ cellId: label, code: "2 + 2" });
+              await kernel.close();
+              console.log("WORKING transport", JSON.stringify({label, readyMs, result}));
+            } catch (error) {
+              console.log("WORKING transport", JSON.stringify({label, stage, failedMs: performance.now() - begin, error: String(error)}));
+            }
+          }
+          '@ | Set-Content -Encoding utf8 py-host.ts
+          $hostRoot = "$env:RUNNER_TEMP/py-host"
+          New-Item -ItemType Directory -Force $hostRoot | Out-Null
+          bun build --compile --target bun-windows-x64 py-host.ts --outfile "$hostRoot/py-host.exe"
+          $sidecar = "$hostRoot/node_modules/@code-yeongyu/senpi-codemode/src/kernels/py"
+          New-Item -ItemType Directory -Force $sidecar | Out-Null
+          $source = Get-Content packages/senpi-codemode/src/kernels/py/prelude.py -Raw
+          $early = "import sys`nsys.__stdout__.write('{`"type`":`"status`",`"event`":{`"op`":`"kernel-startup`",`"stage`":`"stdlib-imports`"}}\n')`nsys.__stdout__.flush()`n"
+          $source.Replace("import ast`n", "$early`nimport ast`n") | Set-Content -Encoding utf8 "$sidecar/prelude.py"
+          & "$hostRoot/py-host.exe"
+          Pop-Location
       - name: Measure fresh prelude stages
         shell: pwsh
         run: |

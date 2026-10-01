@@ -46,7 +46,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           repository: code-yeongyu/senpi
-          ref: 3d2a337bb
+          ref: 3d2a337bb30bdb608dd2b5702a54be71173c18df
           path: senpi-lab
       - name: Compile main Python transport and capture cold deadline miss
         shell: pwsh

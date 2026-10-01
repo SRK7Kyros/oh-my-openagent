@@ -22,6 +22,7 @@ on:
           - full-shard-2
           - member-residency
           - rpc-host
+          - synthetic-9219
       iterations:
         description: Number of identical iterations to run
         required: true
@@ -165,6 +166,12 @@ jobs:
                 Arguments = [string[]]@("--config=bunfig.win2.parallel.toml", "test", "--parallel", "packages/senpi-task/src/runners/rpc-host")
               }
             )
+            "synthetic-9219" = @(
+              [ordered]@{
+                Phase = "test"
+                Arguments = [string[]]@("test", "--parallel")
+              }
+            )
             "full-shard-2" = @(
               [ordered]@{
                 Phase = "quarantine"
@@ -212,13 +219,15 @@ jobs:
           }
 
           $telemetryDirectory = Join-Path $env:RUNNER_TEMP "windows-flake-soak-telemetry"
+          $telemetryWrapper = Join-Path $PWD ".github/scripts/windows-ci-telemetry.ps1"
+          if ($target -eq "synthetic-9219") { Set-Location probe-9219 }
           $phases = @($targets[$target])
           $failedIterations = [System.Collections.Generic.List[int]]::new()
           for ($iteration = 1; $iteration -le $iterationCount; $iteration++) {
             "iterations_ran=$iteration" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
             foreach ($phase in $phases) {
               $invocation = "$target-iteration-$iteration-$($phase.Phase)"
-              & .github/scripts/windows-ci-telemetry.ps1 `
+              & $telemetryWrapper `
                 -ArtifactDirectory $telemetryDirectory `
                 -Invocation $invocation `
                 -TestArguments $phase.Arguments

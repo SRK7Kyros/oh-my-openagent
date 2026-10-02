@@ -5,9 +5,9 @@ import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
-import type { TuiPluginApi, TuiPluginMeta, TuiSlotPlugin } from "@opencode-ai/plugin/tui"
+import type { RGBA } from "@opentui/core"
 
-import tuiModule, { handleTuiPollError, registerSidebarContentSlot } from "./tui"
+import tuiModule, { handleTuiPollError } from "./tui"
 
 type SolidNode = {
   readonly tag: string
@@ -15,63 +15,78 @@ type SolidNode = {
   readonly children: unknown[]
 }
 
-type SidebarApiForTest = {
-  readonly state: {
-    readonly path: {
-      readonly directory: string
-    }
-    readonly session: {
-      readonly get: () => undefined
-      readonly messages: () => []
-      readonly status: () => { readonly type: "idle" }
-      readonly permission: () => []
-      readonly question: () => []
-    }
-  }
-  readonly theme: {
-    readonly current: Record<string, unknown>
-  }
-  readonly slots: {
-    readonly register: (registration: TuiSlotPlugin) => string
-  }
-  readonly client: {
-    readonly session: {
-      readonly list: () => Promise<{ readonly data: [] }>
-      readonly create: () => Promise<{ readonly data: undefined }>
-      readonly abort: () => Promise<{ readonly data: true }>
-      readonly delete: () => Promise<{ readonly data: true }>
-    }
-  }
-  readonly keymap: {
-    readonly registerLayer: () => () => void
-  }
-  readonly mode: {
-    readonly current: () => string
-  }
-  readonly route: {
-    readonly current: {
-      readonly name: "home"
-    }
-    readonly navigate: () => void
-  }
-  readonly event: {
-    readonly on: () => () => void
-  }
-  readonly ui: {
-    readonly Prompt: () => undefined
-    readonly Slot: () => undefined
-    readonly toast: () => void
-  }
-  readonly renderer: {
-    readonly requestRender: () => void
-  }
-  readonly lifecycle: {
-    readonly signal: AbortSignal
-    readonly onDispose: (dispose: () => void) => () => void
-  }
+type SlotClaimForTest = {
+  readonly append: string
+  readonly render: (input: { readonly sessionID: string }) => SolidNode
 }
 
-describe("TUI sidebar polling", () => {
+type SidebarSetupContext = Parameters<typeof tuiModule.setup>[0]
+
+function rgba(): RGBA {
+  return {} as RGBA
+}
+
+function sidebarHarness(tempDir: string, claims: SlotClaimForTest[], renders: number[]) {
+  const store = { view: undefined as unknown }
+  const context = {
+    renderer: {
+      requestRender: () => {
+        renders.push(Date.now())
+      },
+    },
+    theme: {
+      text: {
+        base: rgba(),
+        muted: rgba(),
+        feedback: {
+          error: { base: rgba() },
+          warning: { base: rgba() },
+          success: { base: rgba() },
+          info: { base: rgba() },
+        },
+      },
+      border: { base: rgba() },
+      hue: { accent: { 500: rgba() } },
+    },
+    location: { directory: tempDir },
+    client: {},
+    data: {
+      on: () => () => undefined,
+      location: { default: () => ({ directory: tempDir }) },
+      session: {
+        get: () => undefined,
+        status: () => "idle" as const,
+        message: { list: () => [] },
+        permission: { list: () => [] },
+      },
+    },
+    storage: {
+      memory: (_key: string, options: { readonly initial: { readonly view: unknown } }) => {
+        store.view = options.initial.view
+        return [
+          store,
+          (mutation: (draft: { view: unknown }) => void) => {
+            const draft = { view: store.view }
+            mutation(draft)
+            store.view = draft.view
+          },
+        ] as const
+      },
+    },
+    ui: {
+      slot: (claim: SlotClaimForTest) => {
+        claims.push(claim)
+        return () => undefined
+      },
+      toast: { show: () => undefined },
+      dialog: { show: () => undefined, clear: () => undefined },
+      router: { current: () => ({ type: "home" as const }), navigate: () => undefined },
+    },
+  }
+  return { context: context as unknown as SidebarSetupContext, store }
+}
+
+describe("TUI sidebar v2 lifecycle", () => {
   let tempDir = ""
 
   beforeEach(() => {
@@ -83,131 +98,43 @@ describe("TUI sidebar polling", () => {
     rmSync(tempDir, { recursive: true, force: true })
   })
 
-  it("#given the TUI plugin starts #when it registers the sidebar slot #then an initial render is requested immediately", async () => {
+  it("#given the v2 setup runs #when it registers the sidebar #then the slot is appended to sidebar.content", async () => {
     // given
-    const calls: string[] = []
-    const disposers: (() => void)[] = []
-    let registration: TuiSlotPlugin | undefined
+    const claims: SlotClaimForTest[] = []
+    const { context, store } = sidebarHarness(tempDir, claims, [])
 
-    mock.module("@opentui/solid", () => ({
-      createElement: (tag: string): SolidNode => ({ tag, props: {}, children: [] }),
-      insert: (parent: SolidNode, child: unknown): void => {
-        parent.children.push(child)
-      },
-      setProp: (node: SolidNode, name: string, value: unknown): void => {
-        node.props[name] = value
-      },
+    // when
+    const cleanup = await tuiModule.setup(context)
+
+    // then
+    expect(claims).toHaveLength(1)
+    const claim = claims[0]
+    if (!claim) throw new Error("sidebar slot was not registered")
+    expect(claim.append).toBe("sidebar.content")
+    expect(claim.render).toBeFunction()
+    expect(store.view).toBeDefined()
+
+    if (typeof cleanup === "function") cleanup()
+  })
+
+  it("#given sidebar is disabled in config #when the v2 setup runs #then no slot is registered", async () => {
+    // given
+    mock.module("./config/validate", () => ({
+      validatePluginConfig: () => ({ valid: true, messages: [], config: { tui: { sidebar: { enabled: false } } } }),
     }))
-
-    const api = {
-      state: {
-        path: { directory: tempDir },
-        session: {
-          get: () => undefined,
-          messages: () => [],
-          status: () => ({ type: "idle" as const }),
-          permission: () => [],
-          question: () => [],
-        },
-      },
-      theme: { current: {} },
-      slots: {
-        register: (nextRegistration: TuiSlotPlugin): string => {
-          calls.push("register")
-          registration = nextRegistration
-          return "omo-sidebar-slot"
-        },
-      },
-      client: {
-        session: {
-          list: async () => ({ data: [] }),
-          create: async () => ({ data: undefined }),
-          abort: async () => ({ data: true as const }),
-          delete: async () => ({ data: true as const }),
-        },
-      },
-      keymap: {
-        registerLayer: (): (() => void) => () => undefined,
-      },
-      mode: {
-        current: () => "base",
-      },
-      route: {
-        current: { name: "home" as const },
-        navigate: () => undefined,
-      },
-      event: {
-        on: (): (() => void) => () => undefined,
-      },
-      ui: {
-        Prompt: () => undefined,
-        Slot: () => undefined,
-        toast: () => undefined,
-      },
-      renderer: {
-        requestRender: (): void => {
-          calls.push("render")
-        },
-      },
-      lifecycle: {
-        signal: new AbortController().signal,
-        onDispose: (dispose: () => void): (() => void) => {
-          disposers.push(dispose)
-          return () => undefined
-        },
-      },
-    } satisfies SidebarApiForTest
+    const claims: SlotClaimForTest[] = []
+    const { context } = sidebarHarness(tempDir, claims, [])
 
     // when
-    await tuiModule.tui(api as unknown as TuiPluginApi, undefined, {} as TuiPluginMeta)
+    const cleanup = await tuiModule.setup(context)
 
     // then
-    expect(calls).toEqual(["register", "register", "render"])
-    expect(registration).toBeDefined()
-    if (!registration) {
-      throw new Error("sidebar slot was not registered")
-    }
-    expect(registration.order).toBe(900)
-    expect(Object.keys(registration.slots)).toEqual(["sidebar_content"])
-    expect(registration.slots.sidebar_content).toBeFunction()
-    for (const dispose of disposers) dispose()
+    expect(claims).toHaveLength(0)
+    if (typeof cleanup === "function") cleanup()
   })
+})
 
-  it("#given sidebar state changes after the slot mounts #when the host renders again #then the sidebar output is current", () => {
-    // given
-    let state = "initial"
-    let registration: TuiSlotPlugin | undefined
-    let mountedOutput: unknown
-    let renderedOutput: unknown
-    let requestRender = (): void => undefined
-    registerSidebarContentSlot({
-      registerSlot: (nextRegistration) => {
-        registration = nextRegistration as TuiSlotPlugin
-      },
-      requestRender: () => {
-        requestRender = () => {
-          if (typeof mountedOutput === "function") {
-            renderedOutput = (mountedOutput as () => string)()
-          }
-        }
-      },
-      renderSidebar: () => state,
-    })
-
-    // when
-    if (!registration) throw new Error("sidebar slot was not registered")
-    mountedOutput = registration.slots.sidebar_content()
-    const initialOutput = (mountedOutput as () => string)()
-    state = "updated"
-    // requestRender is the host's signal; Solid re-evaluates the returned child accessor.
-    renderedOutput = undefined
-    requestRender()
-
-    // then
-    expect(initialOutput).toBe("initial")
-    expect(renderedOutput).toBe("updated")
-  })
-
+describe("TUI sidebar polling errors", () => {
   it("#given an unexpected Error during polling #when the poll error handler runs #then the error is logged", () => {
     // given
     const pollError = new TypeError("view derivation failed")

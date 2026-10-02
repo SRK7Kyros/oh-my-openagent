@@ -1,4 +1,5 @@
-import type { TuiPluginModule } from "@opencode-ai/plugin/tui"
+import type { TuiPluginApi } from "@opencode-ai/plugin/tui"
+import type { RGBA } from "@opentui/core"
 
 import { registerBtwSideTui } from "./features/btw-side"
 import { registerNativeEditionNudgeTui } from "./features/native-edition-nudge"
@@ -13,40 +14,226 @@ import type { SidebarView } from "./features/tui-sidebar/state-types"
 import { log } from "./shared/logger"
 import { trackLoadedPluginSandbox } from "./hooks/auto-update-checker/checker/sandbox-refresh"
 
-type SolidRuntime<Node> = {
-  readonly createElement: (tag: string) => Node
-  readonly insert: (parent: Node, child: Node | string) => unknown
-  readonly setProp: (node: Node, name: string, value: unknown) => unknown
+// The OpenCode v2 TUI plugin contract is `{ id, setup(context) }`. This module is
+// built against the v1 `TuiPluginApi` types that OMO still ships, so the context
+// surface it consumes is declared structurally here instead of imported.
+type TuiResolvedTheme = {
+  readonly text: {
+    readonly base: RGBA
+    readonly muted: RGBA
+    readonly feedback: Readonly<
+      Record<"error" | "warning" | "success" | "info", { readonly base: RGBA }>
+    >
+  }
+  readonly border: { readonly base: RGBA }
+  readonly hue: { readonly accent: Readonly<Record<number, RGBA>> }
 }
 
-type SidebarSlotRegistration<Node> = {
-  readonly order: number
-  readonly slots: {
-    readonly sidebar_content: () => Node | (() => Node)
+type TuiLocation = { readonly directory: string }
+
+type TuiRoute =
+  | { readonly type: "home" }
+  | { readonly type: "session"; readonly sessionID: string }
+  | { readonly type: "plugin"; readonly id: string; readonly name: string }
+
+type TuiDestination = { readonly type: "home" } | { readonly type: "session"; readonly sessionID: string }
+
+type SolidRuntime = Pick<typeof import("@opentui/solid"), "createElement" | "insert" | "setProp">
+type SolidNode = ReturnType<SolidRuntime["createElement"]>
+
+type TuiSlotClaim = {
+  readonly append: "sidebar.content"
+  readonly render: (input: { readonly sessionID: string }) => SolidNode
+}
+
+type TuiSetupContext = {
+  readonly renderer: { readonly requestRender: () => void }
+  readonly theme: TuiResolvedTheme
+  readonly location: TuiLocation | undefined
+  readonly client: unknown
+  readonly data: {
+    readonly on: (type: string, handler: (event: unknown) => void) => () => void
+    readonly location: { readonly default: () => TuiLocation }
+    readonly session: {
+      readonly get: (sessionID: string) => unknown
+      readonly status: (sessionID: string) => "idle" | "running"
+      readonly message: { readonly list: (sessionID: string) => readonly unknown[] }
+      readonly permission: { readonly list: (sessionID: string) => readonly unknown[] | undefined }
+    }
+  }
+  readonly storage: {
+    readonly memory: <Value extends object>(
+      key: string,
+      options: { readonly initial: Value },
+    ) => readonly [Value, (mutation: (draft: Value) => void) => void]
+  }
+  readonly ui: {
+    readonly slot: (claim: TuiSlotClaim) => () => void
+    readonly toast: {
+      readonly show: (input: {
+        readonly message: string
+        readonly variant?: string
+        readonly title?: string
+        readonly duration?: number
+      }) => void
+    }
+    readonly dialog: {
+      readonly show: (render: () => unknown) => void
+      readonly clear: () => void
+    }
+    readonly router: {
+      readonly current: () => TuiRoute
+      readonly navigate: (destination: TuiDestination) => void
+    }
   }
 }
 
-type RegisterSidebarContentSlotInput<Node> = {
-  readonly registerSlot: (registration: SidebarSlotRegistration<Node>) => void
-  readonly requestRender: () => void
-  readonly renderSidebar: () => Node
+type TuiSetupCleanup = () => void
+
+type TuiDefinition = {
+  readonly id: string
+  readonly setup: (
+    context: TuiSetupContext,
+  ) => TuiSetupCleanup | Promise<TuiSetupCleanup | undefined> | undefined
 }
 
-export function registerSidebarContentSlot<Node>({
-  registerSlot,
-  requestRender,
-  renderSidebar,
-}: RegisterSidebarContentSlotInput<Node>): void {
-  registerSlot({
-    order: 900,
-    slots: {
-      sidebar_content: () => renderSidebar,
+type TuiThemeLike = {
+  readonly text?: RGBA
+  readonly textMuted?: RGBA
+  readonly borderSubtle?: RGBA
+  readonly error?: RGBA
+  readonly warning?: RGBA
+  readonly success?: RGBA
+  readonly info?: RGBA
+  readonly accent?: RGBA
+}
+
+// The exact v1 `TuiPluginApi` surface OMO's TUI features consume (see
+// features/btw-side/* and features/native-edition-nudge/tui.ts). Only members
+// the v2 context can supply are present; anything v2 lacks is left undefined so
+// the consumers' existing try/catch degrades instead of fabricating behavior.
+type LegacyTuiApi = {
+  readonly renderer: TuiSetupContext["renderer"]
+  readonly theme: { readonly current: TuiThemeLike }
+  readonly client: unknown
+  readonly state: {
+    readonly path: { readonly directory: string }
+    readonly session: {
+      readonly get: (sessionID: string) => unknown
+      readonly messages: (sessionID: string) => unknown
+      readonly status: (sessionID: string) => { readonly type: "idle" | "busy" }
+      readonly permission: (sessionID: string) => readonly unknown[]
+      readonly question: (sessionID: string) => readonly unknown[]
+    }
+  }
+  readonly route: {
+    readonly current: { readonly name: string; readonly params?: Record<string, unknown> }
+    readonly navigate: (name: string, params?: Record<string, unknown>) => void
+  }
+  readonly ui: {
+    readonly toast: (input: {
+      readonly message: string
+      readonly variant?: string
+      readonly title?: string
+      readonly duration?: number
+    }) => void
+    readonly dialog: {
+      readonly replace: (render: () => unknown) => void
+      readonly clear: () => void
+    }
+  }
+  readonly event: {
+    readonly on: (type: string, handler: (event: unknown) => void) => () => void
+  }
+  readonly lifecycle: {
+    readonly onDispose: (dispose: () => void) => () => void
+  }
+}
+
+function mapTheme(theme: TuiResolvedTheme): TuiThemeLike {
+  return {
+    text: theme.text.base,
+    textMuted: theme.text.muted,
+    borderSubtle: theme.border.base,
+    error: theme.text.feedback.error.base,
+    warning: theme.text.feedback.warning.base,
+    success: theme.text.feedback.success.base,
+    info: theme.text.feedback.info.base,
+    accent: theme.hue.accent[500],
+  }
+}
+
+function legacyRoute(context: TuiSetupContext): { readonly name: string; readonly params?: Record<string, unknown> } {
+  const route = context.ui.router.current()
+  if (route.type === "session") return { name: "session", params: { sessionID: route.sessionID } }
+  return { name: route.type }
+}
+
+function createLegacyTuiApi(
+  context: TuiSetupContext,
+  directory: string,
+): { readonly api: TuiPluginApi; readonly cleanups: Array<() => void> } {
+  const cleanups: Array<() => void> = []
+  const legacy = {
+    renderer: context.renderer,
+    theme: { current: mapTheme(context.theme) },
+    client: context.client,
+    state: {
+      path: { directory },
+      session: {
+        get: (sessionID: string) => context.data.session.get(sessionID),
+        messages: (sessionID: string) => context.data.session.message.list(sessionID),
+        status: (sessionID: string) => ({
+          type: context.data.session.status(sessionID) === "running" ? ("busy" as const) : ("idle" as const),
+        }),
+        permission: (sessionID: string) => context.data.session.permission.list(sessionID) ?? [],
+        question: () => [],
+      },
     },
-  })
-  requestRender()
+    route: {
+      get current() {
+        return legacyRoute(context)
+      },
+      navigate: (name: string, params?: Record<string, unknown>) => {
+        if (name === "session" && typeof params?.["sessionID"] === "string") {
+          context.ui.router.navigate({ type: "session", sessionID: params["sessionID"] })
+          return
+        }
+        if (name === "home") context.ui.router.navigate({ type: "home" })
+      },
+    },
+    ui: {
+      toast: (input: { message: string; variant?: string; title?: string; duration?: number }) =>
+        context.ui.toast.show({
+          message: input.message,
+          variant: input.variant,
+          title: input.title,
+          duration: input.duration,
+        }),
+      dialog: {
+        replace: (render: () => unknown) => context.ui.dialog.show(render),
+        clear: () => context.ui.dialog.clear(),
+      },
+    },
+    event: {
+      on: (type: string, handler: (event: unknown) => void) => context.data.on(type, handler),
+    },
+    lifecycle: {
+      onDispose: (dispose: () => void) => {
+        cleanups.push(dispose)
+        return () => {
+          const index = cleanups.indexOf(dispose)
+          if (index !== -1) cleanups.splice(index, 1)
+        }
+      },
+    },
+  } satisfies LegacyTuiApi
+  // The v2 context cannot satisfy the v1 `TuiPluginApi` type (the two contracts
+  // differ), so the mapped subset is bridged here with a single local cast.
+  return { api: legacy as unknown as TuiPluginApi, cleanups }
 }
 
-function materialize<Node>(nodes: readonly ViewNode[], solid: SolidRuntime<Node>): Node {
+function materialize(nodes: readonly ViewNode[], solid: SolidRuntime): SolidNode {
   const root = solid.createElement("box")
   solid.setProp(root, "flexDirection", "column")
   for (const node of nodes) {
@@ -55,7 +242,7 @@ function materialize<Node>(nodes: readonly ViewNode[], solid: SolidRuntime<Node>
   return root
 }
 
-function materializeNode<Node>(node: ViewNode, solid: SolidRuntime<Node>): Node {
+function materializeNode(node: ViewNode, solid: SolidRuntime): SolidNode {
   const element = solid.createElement(node.kind)
   for (const [name, value] of Object.entries(node.props)) {
     solid.setProp(element, name, value)
@@ -117,9 +304,9 @@ export function handleTuiPollError(
   throw error
 }
 
-const module: TuiPluginModule = {
+const module: TuiDefinition = {
   id: "oh-my-openagent:tui",
-  tui: async (api) => {
+  setup: async (context) => {
     // The TUI plugin runs on OpenCode's main thread, the only thread that
     // emits `exit`; it applies a sandbox refresh the server plugin requested.
     trackLoadedPluginSandbox()
@@ -128,6 +315,9 @@ const module: TuiPluginModule = {
     if (!solid) {
       return
     }
+
+    const directory = context.location?.directory ?? context.data.location.default().directory
+    const { api, cleanups } = createLegacyTuiApi(context, directory)
 
     try {
       await registerBtwSideTui(api, solid)
@@ -141,26 +331,44 @@ const module: TuiPluginModule = {
       log("[native-edition-nudge] TUI registration failed", { error })
     }
 
-    const directory = api.state.path.directory
-    if ((await loadPluginValidation(directory)).config.tui?.sidebar?.enabled === false) {
-      return
-    }
-
-    let currentView = await readView(directory)
-    let currentKey = viewKey(currentView)
     let disposed = false
-    let inFlight = false
     let timer: ReturnType<typeof setTimeout> | null = null
 
-    registerSidebarContentSlot({
-      registerSlot: (registration) => {
-        api.slots.register(registration)
+    const runCleanups = (): void => {
+      if (disposed) return
+      disposed = true
+      if (timer) clearTimeout(timer)
+      while (cleanups.length > 0) {
+        const cleanup = cleanups.pop()
+        if (cleanup) cleanup()
+      }
+    }
+
+    if ((await loadPluginValidation(directory)).config.tui?.sidebar?.enabled === false) {
+      return runCleanups
+    }
+
+    const initialView = await readView(directory)
+    const [sidebar, setSidebar] = context.storage.memory<{ view: SidebarView }>(
+      "oh-my-openagent:tui-sidebar",
+      { initial: { view: initialView } },
+    )
+
+    let currentKey = viewKey(initialView)
+
+    const unregisterSlot = context.ui.slot({
+      append: "sidebar.content",
+      render: () => {
+        const root = solid.createElement("box")
+        solid.setProp(root, "flexDirection", "column")
+        solid.insert(root, () =>
+          materialize(buildViewNodes(sidebar.view, mapTheme(context.theme)), solid),
+        )
+        return root
       },
-      requestRender: () => {
-        api.renderer.requestRender()
-      },
-      renderSidebar: () => materialize(buildViewNodes(currentView, api.theme.current), solid),
     })
+
+    let inFlight = false
 
     const schedule = (): void => {
       timer = setTimeout(tick, POLL_INTERVAL_MS)
@@ -176,9 +384,11 @@ const module: TuiPluginModule = {
         const nextView = await readView(directory)
         const nextKey = viewKey(nextView)
         if (nextKey !== currentKey) {
-          currentView = nextView
           currentKey = nextKey
-          api.renderer.requestRender()
+          setSidebar((draft) => {
+            draft.view = nextView
+          })
+          context.renderer.requestRender()
         }
       } catch (error) {
         handleTuiPollError(error)
@@ -189,10 +399,11 @@ const module: TuiPluginModule = {
     }
 
     schedule()
-    api.lifecycle.onDispose(() => {
-      disposed = true
-      if (timer) clearTimeout(timer)
-    })
+
+    return () => {
+      unregisterSlot()
+      runCleanups()
+    }
   },
 }
 

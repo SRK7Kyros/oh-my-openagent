@@ -4,21 +4,13 @@ import { applyAgentEntry, isRecord, toModelRef } from "./agent"
 export { toModelRef } from "./agent"
 
 /**
- * v2 built-in primary agents that must stay selectable. OMO's v1 config
- * demotes `build`/`plan` to `subagent`+`hidden` (sisyphus is v1's primary), but
- * v2's `AgentEditor` has no `add()` so sisyphus cannot exist — demoting build
- * would leave v2 with no selectable primary.
+ * v2's `AgentEditor.update()` UPSERTS, so OMO's own primaries (sisyphus) are
+ * CREATED by the agent transform below. That makes v1's `build`/`plan`
+ * demotion (`subagent`+`hidden`) safe to apply on v2 as well: there is always
+ * a selectable OMO primary, so the old "keep build/plan selectable" guard was
+ * obsolete and merely re-exposed the host built-ins in agent pickers (e.g.
+ * OpenChamber), which the user does not want when running OMO.
  */
-const V2_PRIMARY_AGENTS = new Set(["build", "plan"])
-
-function stripDemotion(definition: Record<string, unknown>): Record<string, unknown> {
-  const result: Record<string, unknown> = {}
-  for (const [key, value] of Object.entries(definition)) {
-    if (key === "mode" || key === "hidden") continue
-    result[key] = value
-  }
-  return result
-}
 
 /**
  * Copy a v1 agent/provider definition onto a v2 runtime record. v2-structured
@@ -83,7 +75,8 @@ export function createModelTransformAdapter(run: () => Promise<Record<string, un
 // v2's AgentEditor has no add(), but `update(id, fn)` UPSERTS: the draft seeds
 // a fresh `AgentV2.Info.empty(id)` when the id is missing
 // (packages/core/src/plugin/agent.ts). OMO's own agents are therefore CREATED
-// here, not skipped. Existing host agents keep the update path (no regression).
+// here, not skipped. Existing host agents take the update path and receive
+// OMO's definition verbatim — including v1's `build`/`plan` demotion.
 export function createAgentTransformAdapter(run: () => Promise<Record<string, unknown>>) {
   return async (editor: V2AgentEditor): Promise<void> => {
     const config = await run()
@@ -96,8 +89,7 @@ export function createAgentTransformAdapter(run: () => Promise<Record<string, un
           editor.update(id, (agent) => applyAgentEntry(agent, id, definition))
           created.add(id)
         } else {
-          const safe = V2_PRIMARY_AGENTS.has(id) ? stripDemotion(definition) : definition
-          editor.update(id, (agent) => applyDefinition(agent, safe))
+          editor.update(id, (agent) => applyDefinition(agent, definition))
         }
       }
     }

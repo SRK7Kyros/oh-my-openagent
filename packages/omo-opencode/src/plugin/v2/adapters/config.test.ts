@@ -86,7 +86,7 @@ describe("toModelRef", () => {
 
 // ---------------------------------------------------------------------------
 // createAgentTransformAdapter — default-agent guard + model coercion +
-// build/plan demotion strip + v2-structured key guards.
+// build/plan demotion + v2-structured key guards.
 // ---------------------------------------------------------------------------
 describe("createAgentTransformAdapter", () => {
   it("sets the default agent when it exists in the v2 registry", async () => {
@@ -113,7 +113,7 @@ describe("createAgentTransformAdapter", () => {
     expect(defaultFn).not.toHaveBeenCalled()
   })
 
-  it("coerces a string model to Model.Ref and never demotes build", async () => {
+  it("coerces a string model to Model.Ref and demotes build like v1", async () => {
     const updates: Record<string, Record<string, unknown>> = {}
     const editor: V2AgentEditor = {
       default: mock(() => {}),
@@ -135,13 +135,13 @@ describe("createAgentTransformAdapter", () => {
       },
     })
     await createAgentTransformAdapter(run)(editor)
-    expect(updates.build?.mode).toBe("primary")
-    expect(updates.build?.hidden).toBe(false)
+    expect(updates.build?.mode).toBe("subagent")
+    expect(updates.build?.hidden).toBe(true)
     expect(updates.build?.model).toEqual({ id: "mimo-v2.6-pro", providerID: "opencode-go" })
     expect(updates.build?.description).toBe("Build agent")
   })
 
-  it("never demotes plan either", async () => {
+  it("demotes plan too", async () => {
     const updates: Record<string, Record<string, unknown>> = {}
     const editor: V2AgentEditor = {
       default: mock(() => {}),
@@ -156,8 +156,8 @@ describe("createAgentTransformAdapter", () => {
       agent: { plan: { mode: "subagent", hidden: true, description: "Plan agent" } },
     })
     await createAgentTransformAdapter(run)(editor)
-    expect(updates.plan?.mode).toBe("primary")
-    expect(updates.plan?.hidden).toBe(false)
+    expect(updates.plan?.mode).toBe("subagent")
+    expect(updates.plan?.hidden).toBe(true)
     expect(updates.plan?.description).toBe("Plan agent")
   })
 
@@ -307,7 +307,7 @@ describe("createAgentTransformAdapter upsert (v2 agents actually exist)", () => 
     expect(defaultFn).toHaveBeenCalledWith("sisyphus")
   })
 
-  it("updates pre-existing agents without clobbering their fields", async () => {
+  it("updates pre-existing agents, applying demotion without clobbering other fields", async () => {
     const { editor, registry } = makeEditor({
       build: { mode: "primary", hidden: false, description: "host build", hostOwned: true },
     })
@@ -322,8 +322,8 @@ describe("createAgentTransformAdapter upsert (v2 agents actually exist)", () => 
       },
     })
     await createAgentTransformAdapter(run)(editor)
-    expect(registry.build?.mode).toBe("primary")
-    expect(registry.build?.hidden).toBe(false)
+    expect(registry.build?.mode).toBe("subagent")
+    expect(registry.build?.hidden).toBe(true)
     expect(registry.build?.description).toBe("Build agent")
     expect(registry.build?.model).toEqual({ id: "mimo-v2.6-pro", providerID: "opencode-go" })
     expect(registry.build?.hostOwned).toBe(true)

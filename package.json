@@ -108,6 +108,7 @@
   },
   "scripts": {
     "build": "bun run script/build.ts",
+    "build:plugin-dist": "bun run script/build-plugin-dist.ts",
     "build:cli-node": "bun run script/build-cli-node.ts",
     "build:codex-install": "bun run script/build-codex-install.ts",
     "install:codex-dev": "bun run script/build-codex-install.ts && bun run script/install-codex-dev.ts",
